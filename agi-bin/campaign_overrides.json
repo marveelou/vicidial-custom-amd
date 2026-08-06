@@ -1,0 +1,5 @@
+{
+  "extension_overrides": {
+    "8369": {"max_number_of_words": 1}
+  }
+}
