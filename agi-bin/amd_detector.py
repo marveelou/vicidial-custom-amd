@@ -215,51 +215,9 @@ def _energy_silence_segments(raw_pcm16, sample_rate, params: AMDParams):
     return segments
 
 
-def _merge_short_gaps(segments, between_words_silence_ms):
-    """Fix (2026-08-06, round 2): the raw RMS energy segmenter in
-    _energy_silence_segments() treats every dip below silence_threshold as
-    a hard boundary, so ordinary continuous human speech -- which has many
-    brief (20-80ms) dips between syllables, plosive stops, and breaths --
-    gets fragmented into far more "words" than a person (or stock AMD)
-    would ever count. Confirmed directly against a real production file
-    (1786041234.3032630.wav, real stock outcome HUMAN): after the greeting,
-    it has 8 alternating speech/silence segments with silence gaps of only
-    20-80ms between them, which our word-counting loop was counting as 5
-    separate words -- tripping MACHINE/MAXWORDS on a normal single
-    utterance.
-
-    between_words_silence (AMDParams default 50ms, matching stock AMD's
-    own confirmed 6th argument -- AMD(2000,2000,1000,5000,120,50,4,256) on
-    vici-06) is defined for exactly this purpose but, like min_word_length
-    before it, was never actually applied anywhere. This reclassifies any
-    silence segment shorter than that threshold as speech (a real pause
-    between separate words should be longer than this; anything shorter
-    is noise internal to one continuous utterance) and then coalesces
-    adjacent same-type segments, so downstream greeting-length, silence,
-    and word-counting logic all operate on the same "words" a human
-    listener would actually perceive."""
-    if not segments:
-        return segments
-
-    reclassified = [
-        (True, dur_ms) if (not is_speech and dur_ms < between_words_silence_ms) else (is_speech, dur_ms)
-        for is_speech, dur_ms in segments
-    ]
-
-    merged = []
-    for is_speech, dur_ms in reclassified:
-        if merged and merged[-1][0] == is_speech:
-            merged[-1] = (is_speech, merged[-1][1] + dur_ms)
-        else:
-            merged.append((is_speech, dur_ms))
-    return merged
-
-
 def _timing_based_decision(segments, params: AMDParams, total_time_ms):
     """Stock-AMD-equivalent decision from silence/speech segment timing.
     Used as the fallback when no beep tone is detected."""
-    segments = _merge_short_gaps(segments, params.between_words_silence)
-
     if not segments:
         # Confirmed against a real production Asterisk log (vici-06,
         # 2026-08-06): stock AMD treats a channel that stays completely
