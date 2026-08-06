@@ -215,29 +215,22 @@ def _energy_silence_segments(raw_pcm16, sample_rate, params: AMDParams):
     return segments
 
 
-def _merge_short_gaps(segments, between_words_silence_ms):
-    """Reclassify silence segments shorter than between_words_silence_ms as
-    speech (they're brief inter-syllable/inter-word dips within one
-    continuous utterance, not real pauses between separate words), then
-    coalesce adjacent same-type segments. Used ONLY on the post-greeting
-    portion of a call's segment list -- see the round-4 fix comment at
-    its call site in _timing_based_decision() for why it's scoped that
-    way rather than applied to the whole call."""
-    if not segments:
-        return segments
-
-    reclassified = [
-        (True, dur_ms) if (not is_speech and dur_ms < between_words_silence_ms) else (is_speech, dur_ms)
-        for is_speech, dur_ms in segments
-    ]
-
-    merged = []
-    for is_speech, dur_ms in reclassified:
-        if merged and merged[-1][0] == is_speech:
-            merged[-1] = (is_speech, merged[-1][1] + dur_ms)
-        else:
-            merged.append((is_speech, dur_ms))
-    return merged
+# NOTE (2026-08-06): a `_merge_short_gaps()` helper that reclassified silence
+# segments shorter than between_words_silence as speech (to stop natural
+# micro-pauses from over-counting "words") was tried TWICE here -- once
+# applied to the whole segment list before greeting detection (round 2,
+# reverted at 011749a: regressed accuracy 63.7% -> 57.4%), and once scoped to
+# only the post-greeting/word-counting portion (round 4, reverted here:
+# regressed accuracy 62.2% -> 57.2%). Both failed the same way: merging away
+# short gaps can't tell "one human's fragmented continuous speech" apart
+# from "one real machine greeting's multiple short-paused phrases" -- both
+# collapse into fewer, longer "words" under this merge, so machine calls that
+# used to correctly trip MAXWORDS instead fall through to the HUMAN default.
+# Confirmed on real production data both times (custom=HUMAN/stock=MACHINE
+# jumped to >55% of all disagreements each time). Gap-duration merging is not
+# a viable lever for this problem on its own -- do not re-attempt it without
+# a way to distinguish the two cases first (e.g. per-phrase spectral/pitch
+# continuity, not just silence duration).
 
 
 def _timing_based_decision(segments, params: AMDParams, total_time_ms):
@@ -316,26 +309,6 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
     # already skips past any speech segment that short before we get this
     # far, so whatever we land on is either a real candidate greeting or
     # idx >= len(segments) (handled above).
-
-    # Fix (2026-08-06, round 4): merge short gaps ONLY within the
-    # post-greeting portion used for word-counting below -- NOT the
-    # initial-silence/greeting detection above, which round 3 already
-    # handles correctly on its own. This is deliberately narrower than
-    # the round-2 merge (f105267, reverted at 011749a): that one ran
-    # before the greeting was ever identified, so a leading noise blip
-    # could get glued directly onto whatever followed it, corrupting
-    # greeting detection in a way that likely compounded with (or was
-    # the same underlying cause as) the leading-blip bug round 3 fixes
-    # separately -- that's the most likely explanation for why round 2
-    # caused such a large false-HUMAN regression. With greeting detection
-    # now handled correctly beforehand, this only targets the actual
-    # over-counting-of-words problem confirmed on real human speech
-    # (e.g. 1786041234.3032630.wav, real stock outcome HUMAN, still
-    # misclassified MACHINE/MAXWORDS as of this fix's diagnosis): natural
-    # micro-pauses (20-80ms) between syllables/short phrases fragment one
-    # continuous utterance into more "words" than a person -- or stock
-    # AMD -- would count.
-    segments = segments[:idx] + _merge_short_gaps(segments[idx:], params.between_words_silence)
 
     # 3) after-greeting silence
     if idx < len(segments) and not segments[idx][0]:
