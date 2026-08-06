@@ -235,6 +235,33 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
         initial_silence_ms = segments[0][1]
         idx = 1
 
+    # Fix (2026-08-06, round 3): fold away leading noise blips (speech
+    # segments shorter than min_word_length) -- together with whatever
+    # silence immediately follows each one -- into initial_silence, before
+    # picking "the greeting". Confirmed via a real production
+    # disagreement (1786041228.3032616.wav, real stock outcome MACHINE,
+    # our result was HUMAN): a 20ms noise blip was being treated AS the
+    # greeting, and the genuine 1060ms gap before the real message (which
+    # followed right after) was then misread as "after-greeting silence"
+    # -- since 1060ms >= after_greeting_silence(1000ms), the call was
+    # declared HUMAN at elapsed=1100ms, before ever analyzing the actual
+    # 6-word message that followed. The old comment here claimed treating
+    # a short blip as a short greeting "biases toward HUMAN, which is
+    # safe" -- this real case proves that assumption wrong: it can skip
+    # the real content entirely, not just bias toward a safe default.
+    # This is deliberately narrower than the reverted between_words_silence
+    # merge (which merged gaps everywhere and collapsed genuine multi-word
+    # machine greetings into too few words, causing a much larger
+    # regression) -- this only affects leading blips before the greeting
+    # is ever identified.
+    while (idx < len(segments) and segments[idx][0]
+           and segments[idx][1] < params.min_word_length):
+        initial_silence_ms += segments[idx][1]
+        idx += 1
+        if idx < len(segments) and not segments[idx][0]:
+            initial_silence_ms += segments[idx][1]
+            idx += 1
+
     if idx >= len(segments):
         # Nothing but silence for the entire recording. Mirrors stock
         # AMD's own confirmed real-world behavior: total non-response for
@@ -259,12 +286,11 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
     if greeting_ms > params.greeting:
         return AMDResult("MACHINE", "LONGGREETING", greeting_ms, total_time_ms)
 
-    # NOTE: greeting_ms < params.min_word_length (a very short first blip)
-    # is deliberately not specially handled here -- it falls through and
-    # is treated as a short greeting, which is the safe direction (biases
-    # toward HUMAN, not MACHINE). The bug that actually mattered in
-    # practice was in the word-counting loop below, not here -- see fix
-    # dated 2026-08-06.
+    # NOTE: greeting_ms can no longer be < params.min_word_length here --
+    # the leading-noise-blip fold above (fix dated 2026-08-06, round 3)
+    # already skips past any speech segment that short before we get this
+    # far, so whatever we land on is either a real candidate greeting or
+    # idx >= len(segments) (handled above).
 
     # 3) after-greeting silence
     if idx < len(segments) and not segments[idx][0]:
