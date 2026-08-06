@@ -219,6 +219,13 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
     """Stock-AMD-equivalent decision from silence/speech segment timing.
     Used as the fallback when no beep tone is detected."""
     if not segments:
+        # Confirmed against a real production Asterisk log (vici-06,
+        # 2026-08-06): stock AMD treats a channel that stays completely
+        # silent for the full initial_silence window as ANSWERING MACHINE
+        # ("ANSWERING MACHINE: silenceDuration:2000 initialSilence:2000"),
+        # not as an uncertain/human-leaning case. An empty segment list
+        # here means the whole clip was too short to even measure -- keep
+        # that genuinely-ambiguous case as NOTSURE.
         return AMDResult("NOTSURE", "NOAUDIODATA", total_time_ms, total_time_ms)
 
     idx = 0
@@ -227,10 +234,17 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
     if not segments[0][0]:
         initial_silence_ms = segments[0][1]
         idx = 1
-        if initial_silence_ms > params.initial_silence:
-            return AMDResult("NOTSURE", "INITIALSILENCE", initial_silence_ms, total_time_ms)
 
     if idx >= len(segments):
+        # Nothing but silence for the entire recording. Mirrors stock
+        # AMD's own confirmed real-world behavior: total non-response for
+        # at least the configured initial_silence window is a MACHINE
+        # determination (e.g. dead air / no greeting ever picked up), not
+        # an uncertain case. A clip that's silent but SHORTER than the
+        # configured threshold is genuinely inconclusive (likely just a
+        # truncated recording) and stays NOTSURE.
+        if initial_silence_ms >= params.initial_silence:
+            return AMDResult("MACHINE", "SILENCE", initial_silence_ms, total_time_ms)
         return AMDResult("NOTSURE", "NOAUDIODATA", total_time_ms, total_time_ms)
 
     # 2) greeting (first speech segment)

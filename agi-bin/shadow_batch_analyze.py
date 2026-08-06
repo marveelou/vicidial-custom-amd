@@ -68,7 +68,20 @@ def process_one(path):
     except Exception:
         pass
 
-    params = get_params(extension=None, campaign_id=campaign_id)
+    # All confirmed live campaigns currently route through extension 8369
+    # (checked directly against production vicidial_campaigns.campaign_vdad_exten --
+    # 19/19 active campaigns use 8369; 8373/8375 are wired in the dialplan
+    # but carry no real traffic). Hardcoding this is what makes shadow-mode
+    # comparisons fair: without it, get_params() silently falls back to
+    # AMDParams' generic defaults (greeting=1500, max_number_of_words=3,
+    # initial_silence=2500) instead of the confirmed stock baseline
+    # (2000,2000,1000,5000,120,50,4,256) -- this mismatch was the dominant
+    # cause of the inflated MAXWORDS/LONGGREETING disagreement rate seen
+    # in the first shadow-mode batch on 2026-08-06. Revisit this if
+    # 8373/8375 ever carry real traffic.
+    extension = "8369"
+
+    params = get_params(extension=extension, campaign_id=campaign_id)
 
     try:
         result = analyze_wav(path, params)
@@ -80,7 +93,7 @@ def process_one(path):
     db_logger.log_decision(
         call_uniqueid=uniqueid,
         campaign_id=campaign_id,
-        extension=None,
+        extension=extension,
         mode="SHADOW",
         custom_status=result.status,
         custom_cause=result.amdcause_str(),
