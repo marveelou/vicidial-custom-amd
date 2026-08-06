@@ -184,10 +184,21 @@ def lookup_stock_result(call_uniqueid=None, lead_id=None):
     try:
         with conn.cursor() as cur:
             if call_uniqueid:
+                # Fix (2026-08-06): this used to match on only the epoch-second
+                # prefix of the uniqueid (call_uniqueid.split(".")[0] + "%"),
+                # which throws away the sequence suffix that actually
+                # distinguishes one call from another. On a busy dialer,
+                # multiple distinct calls placed within the same second share
+                # that epoch-second prefix -- confirmed on real data
+                # (1786041222.3032594 and 1786041222.3032596 both matched the
+                # same wildcard), so "ORDER BY call_date DESC LIMIT 1" could
+                # silently return a COMPLETELY DIFFERENT call's outcome. This
+                # corrupted an unknown fraction of every shadow-mode
+                # comparison logged so far. Match the full uniqueid exactly.
                 cur.execute(
-                    "SELECT status FROM vicidial_log WHERE uniqueid LIKE %s "
+                    "SELECT status FROM vicidial_log WHERE uniqueid = %s "
                     "ORDER BY call_date DESC LIMIT 1",
-                    (call_uniqueid.split(".")[0] + "%",),
+                    (call_uniqueid,),
                 )
             elif lead_id:
                 cur.execute(
