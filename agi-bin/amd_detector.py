@@ -259,9 +259,12 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
     if greeting_ms > params.greeting:
         return AMDResult("MACHINE", "LONGGREETING", greeting_ms, total_time_ms)
 
-    if greeting_ms < params.min_word_length:
-        # too short to be a real word/greeting -- keep listening as noise, treat as human pause
-        pass
+    # NOTE: greeting_ms < params.min_word_length (a very short first blip)
+    # is deliberately not specially handled here -- it falls through and
+    # is treated as a short greeting, which is the safe direction (biases
+    # toward HUMAN, not MACHINE). The bug that actually mattered in
+    # practice was in the word-counting loop below, not here -- see fix
+    # dated 2026-08-06.
 
     # 3) after-greeting silence
     if idx < len(segments) and not segments[idx][0]:
@@ -281,6 +284,19 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
         if is_speech:
             if dur_ms > params.max_word_length:
                 return AMDResult("MACHINE", "MAXWORDLENGTH", elapsed, total_time_ms)
+            # Fix (2026-08-06): min_word_length was defined in AMDParams but
+            # never actually enforced here, so every speech segment --
+            # including short noise blips (breath sounds, line clicks,
+            # plosives split off by the energy segmenter) -- counted as a
+            # full "word". That systematically over-counted word_count on
+            # completely normal human speech and was the dominant cause of
+            # false MACHINE/MAXWORDS results confirmed against real
+            # shadow-mode data (stock=HUMAN in the large majority of the
+            # 162 disagreements in the 2026-08-06 548-file batch). Segments
+            # shorter than min_word_length are noise, not words -- skip
+            # them without counting or resetting the word count.
+            if dur_ms < params.min_word_length:
+                continue
             word_count += 1
             if word_count > params.max_number_of_words:
                 return AMDResult("MACHINE", "MAXWORDS", elapsed, total_time_ms)
