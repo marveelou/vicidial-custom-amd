@@ -21,15 +21,37 @@ What it does:
   1. Reads the AGI environment (channel, uniqueid, callerid, extension).
   2. Looks up per-extension (and optionally per-campaign) tuning from
      campaign_config.py.
-  3. Records the live channel audio to a WAV file via AGI RECORD FILE,
-     capped at total_analysis_time and with Asterisk's own silence
-     detection as an early-exit, same shape as stock AMD's own blocking
-     analysis window.
+  3. Waits for a MixMonitor tap -- started by the DIALPLAN, immediately,
+     before this script ever runs -- to accumulate enough audio, then
+     stops it and reads the resulting WAV file. See the 2026-08-07 fix
+     note below for why this replaced an earlier RECORD-FILE-based
+     approach.
   4. Runs amd_detector.analyze_wav() against that recording (energy/
      silence timing model + FFT beep/tone detection).
   5. Sets AMDSTATUS / AMDCAUSE / AMDSTATS via SET VARIABLE.
   6. Logs the decision to vicidial_custom_amd_log (best-effort, never
      fatal to the call if the DB write fails).
+
+REQUIRED DIALPLAN SHAPE (the MixMonitor line is not optional -- this
+script no longer records anything itself):
+    exten => 8369,n,MixMonitor(/var/spool/asterisk/monitor/custom_amd/${UNIQUEID}.wav)
+    exten => 8369,n,AGI(amd_agi.py,${EXTEN})
+    exten => 8369,n,StopMixMonitor()   ; harmless no-op if amd_agi.py already stopped it
+
+Fix (2026-08-07): this originally called agi.record_file() itself, which
+only starts capturing audio AFTER the AGI round-trip (script launch,
+Python startup, imports, the campaign_id DB lookup) had already happened.
+Confirmed on a real live canary call (CoveColl campaign, temporary
+extension 8399) that this genuinely misses the true beginning of the
+call -- the captured recording started mid-speech with zero leading
+silence, unlike every MixMonitor-tapped shadow-mode recording used to
+tune this engine all day. Since the tuning (max_number_of_words=1) was
+calibrated against recordings that DO start from true time zero, analyzing
+a late-started recording made completely normal human conversations look
+artificially word-dense, and nearly every real live call got flagged
+MACHINE within the first second. Fix: rely on the same zero-latency,
+dialplan-level MixMonitor tap already proven correct in shadow mode,
+instead of this script's own delayed RECORD FILE.
 
 Exits silently on any unexpected error with AMDSTATUS=NOTSURE rather than
 letting an exception kill the AGI mid-call -- VD_amd.agi's default branch
@@ -75,12 +97,15 @@ def main():
     uniqueid = agi.env.get("agi_uniqueid", "")
     callerid = agi.env.get("agi_callerid", "")
 
+    # NOTE: RECORDING_DIR must already exist BEFORE the dialplan's
+    # MixMonitor line runs (Asterisk does not create missing directories
+    # for it, and MixMonitor starts before this script does) -- this
+    # makedirs is just a best-effort backstop for future calls, not a
+    # substitute for creating it at deploy time.
     try:
         os.makedirs(RECORDING_DIR, exist_ok=True)
     except OSError as e:
         agi.verbose(f"amd_agi: could not create {RECORDING_DIR}: {e}", 1)
-        safe_fallback(agi, "NORECORDDIR")
-        return
 
     campaign_id = None
     try:
@@ -90,23 +115,31 @@ def main():
 
     params = get_params(extension=extension, campaign_id=campaign_id)
 
+    # Must match the dialplan's MixMonitor target exactly:
+    #   MixMonitor(/var/spool/asterisk/monitor/custom_amd/${UNIQUEID}.wav)
+    # -- no "amd-" prefix (that was specific to the old RECORD-FILE naming).
     safe_uniqueid = (uniqueid or f"noid-{int(time.time())}").replace("/", "_")
-    recording_basename = os.path.join(RECORDING_DIR, f"amd-{safe_uniqueid}")
-    recording_path = recording_basename + ".wav"
+    recording_path = os.path.join(RECORDING_DIR, f"{safe_uniqueid}.wav")
+
+    # Wait long enough for the tap (already running since before this
+    # script started -- see module docstring) to have captured at least
+    # total_analysis_time worth of real audio. Deliberately does NOT try
+    # to measure how big a head start MixMonitor already had: sleeping the
+    # full window from here guarantees AT LEAST that much audio exists by
+    # the time we stop and read the file. analyze_wav() only ever looks at
+    # the first total_analysis_time worth of the file's content anyway
+    # (see its own max_samples cap), so waiting slightly longer than the
+    # strict minimum is harmless -- unlike waiting too little, which is
+    # exactly the bug this replaces.
+    time.sleep(params.total_analysis_time / 1000.0)
 
     try:
-        silence_secs = max(1, round(params.after_greeting_silence / 1000.0))
-        agi.record_file(
-            recording_basename,
-            fmt="wav",
-            escape_digits="",
-            timeout_ms=params.total_analysis_time,
-            silence_secs=silence_secs,
-        )
+        agi.exec_app("StopMixMonitor")
     except Exception:
-        agi.verbose("amd_agi: RECORD FILE failed:\n" + traceback.format_exc(), 1)
-        safe_fallback(agi, "RECORDFAIL")
-        return
+        # Not fatal -- the file may still be readable as-is, or the
+        # dialplan's own StopMixMonitor() step right after this AGI call
+        # will finalize it. Log and continue rather than bail out.
+        agi.verbose("amd_agi: StopMixMonitor failed:\n" + traceback.format_exc(), 1)
 
     if not os.path.exists(recording_path) or os.path.getsize(recording_path) < 44:
         # no usable audio captured (e.g. immediate hangup) -- stock AMD's
