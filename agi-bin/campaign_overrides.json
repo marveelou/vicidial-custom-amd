@@ -1,5 +1,9 @@
 {
   "extension_overrides": {
-    "8369": {"max_number_of_words": 1}
-  }
+    "8369": {
+      "max_number_of_words": 1,
+      "toolong_as_machine": true
+    }
+  },
+  "campaign_id_overrides": {}
 }

@@ -26,8 +26,6 @@ _CONF_KEYS = {
 
 
 def _read_astguiclient_conf(path=_CONF_PATH):
-    """Parse the `KEY => value` style astguiclient.conf into a dict of
-    connection kwargs for pymysql.connect()."""
     values = {}
     try:
         with open(path, "r") as f:
@@ -96,8 +94,6 @@ def log_decision(
     stock_cause=None,
     recording_path=None,
 ):
-    """Insert one row into vicidial_custom_amd_log. Returns True/False;
-    never raises."""
     agreement = None
     if stock_status and custom_status:
         agreement = 1 if stock_status.upper() == custom_status.upper() else 0
@@ -135,12 +131,8 @@ def log_decision(
             pass
 
 
-def lookup_campaign_id(callerid):
-    """Best-effort lookup of campaign_id for the in-progress call, same
-    source table VD_amd.agi itself uses (vicidial_auto_calls). Returns None
-    on any failure -- this is an optional enrichment, not required for the
-    detector to work."""
-    if not callerid:
+def lookup_campaign_id(uniqueid, callerid=None, phone_number=None):
+    if not uniqueid and not callerid and not phone_number:
         return None
 
     conn = _connect()
@@ -149,13 +141,33 @@ def lookup_campaign_id(callerid):
 
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT campaign_id FROM vicidial_auto_calls "
-                "WHERE callerid=%s ORDER BY auto_call_id DESC LIMIT 1",
-                (callerid,),
-            )
-            row = cur.fetchone()
-            return row[0] if row else None
+            if uniqueid:
+                cur.execute(
+                    "SELECT campaign_id FROM vicidial_auto_calls "
+                    "WHERE uniqueid=%s ORDER BY auto_call_id DESC LIMIT 1",
+                    (uniqueid,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+            if callerid:
+                cur.execute(
+                    "SELECT campaign_id FROM vicidial_auto_calls "
+                    "WHERE callerid=%s ORDER BY auto_call_id DESC LIMIT 1",
+                    (callerid,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+            if phone_number:
+                cur.execute(
+                    "SELECT campaign_id FROM vicidial_auto_calls "
+                    "WHERE phone_number=%s ORDER BY auto_call_id DESC LIMIT 1",
+                    (phone_number,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+            return None
     except Exception as e:
         print(f"db_logger: campaign_id lookup failed: {e}", file=sys.stderr)
         return None
@@ -167,16 +179,6 @@ def lookup_campaign_id(callerid):
 
 
 def lookup_stock_result(call_uniqueid=None, lead_id=None):
-    """For shadow mode: look up what the REAL (stock AMD driven) call
-    outcome was, from vicidial_log.status. Returns (status_code, None) or
-    (None, None) if not found yet (e.g. called too soon after the call).
-
-    Status code meanings relevant here (see VD_amd.agi):
-        AA      -> stock AMD said MACHINE, call handed to voicemail path
-        AM/UNKAM-> stock AMD said MACHINE, greeting message played
-        AL/UNKAL-> stock AMD said MACHINE, message fully played, hung up
-        (anything else, notably calls that reached an agent) -> stock AMD said HUMAN
-    """
     conn = _connect()
     if conn is None:
         return None, None
@@ -184,17 +186,6 @@ def lookup_stock_result(call_uniqueid=None, lead_id=None):
     try:
         with conn.cursor() as cur:
             if call_uniqueid:
-                # Fix (2026-08-06): this used to match on only the epoch-second
-                # prefix of the uniqueid (call_uniqueid.split(".")[0] + "%"),
-                # which throws away the sequence suffix that actually
-                # distinguishes one call from another. On a busy dialer,
-                # multiple distinct calls placed within the same second share
-                # that epoch-second prefix -- confirmed on real data
-                # (1786041222.3032594 and 1786041222.3032596 both matched the
-                # same wildcard), so "ORDER BY call_date DESC LIMIT 1" could
-                # silently return a COMPLETELY DIFFERENT call's outcome. This
-                # corrupted an unknown fraction of every shadow-mode
-                # comparison logged so far. Match the full uniqueid exactly.
                 cur.execute(
                     "SELECT status FROM vicidial_log WHERE uniqueid = %s "
                     "ORDER BY call_date DESC LIMIT 1",

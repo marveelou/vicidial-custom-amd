@@ -51,7 +51,8 @@ class AMDParams:
                  tone_peak_ratio=0.35,           # dominant-bin energy / total spectral energy
                  tone_freq_stability_hz=40.0,    # max drift between consecutive frames
                  tone_stable_frames=3,           # consecutive frames required
-                 frame_ms=20):
+                 frame_ms=20,
+                 toolong_as_machine=False):      # see TOOLONG handling below
         # --- stock-AMD-equivalent timing parameters (all in milliseconds) ---
         self.initial_silence = initial_silence
         self.greeting = greeting
@@ -73,6 +74,17 @@ class AMDParams:
 
         # --- frame size for analysis ---
         self.frame_ms = frame_ms
+
+        # If the whole analysis window elapses as one continuous speech
+        # segment with no silence break (see TOOLONG below), default is to
+        # stay NOTSURE (safe fallback). Validated 2026-08-10 against 300
+        # real LIVE TOOLONG-caused NOTSURE decisions on CoveColl: 289/300
+        # (96.3%) were confirmed real answering machines (status A), only
+        # 2/300 (0.67%) were confirmed live human conversations (DNC/NI).
+        # Set True per-campaign via campaign_overrides.json to promote
+        # TOOLONG to a MACHINE result instead. Cause string stays "TOOLONG"
+        # either way so this remains distinguishable in logs/analysis.
+        self.toolong_as_machine = toolong_as_machine
 
 
 class AMDResult:
@@ -350,6 +362,8 @@ def _timing_based_decision(segments, params: AMDParams, total_time_ms):
                 return AMDResult("HUMAN", "HUMAN", elapsed, total_time_ms)
 
     if elapsed >= params.total_analysis_time:
+        if params.toolong_as_machine:
+            return AMDResult("MACHINE", "TOOLONG", elapsed, total_time_ms)
         return AMDResult("NOTSURE", "TOOLONG", elapsed, total_time_ms)
 
     return AMDResult("HUMAN", "HUMAN", elapsed, total_time_ms)
