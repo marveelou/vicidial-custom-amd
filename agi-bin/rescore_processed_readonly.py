@@ -62,6 +62,16 @@ def main():
     unknown = 0
     disagreements = []
 
+    # direction/cause breakdown: how many times did we call it X when
+    # stock called it Y, broken down by our specific cause code. This is
+    # what actually tells you WHICH way a change moved things -- raw
+    # accuracy alone can hide a fix that helped one failure mode while
+    # making the opposite failure mode worse.
+    from collections import Counter
+    direction_counts = Counter()   # (custom_status, stock_status) -> count
+    cause_counts = Counter()       # (custom_status, custom_cause, stock_status) -> count
+    cause_examples = {}            # (custom_status, custom_cause, stock_status) -> [fname, ...] (up to 3)
+
     for fname in wav_files:
         path = os.path.join(rec_dir, fname)
         uniqueid = extract_uniqueid(fname)
@@ -82,6 +92,12 @@ def main():
             match += 1
         else:
             disagree += 1
+            key = (result.status, result.cause, stock_status)
+            direction_counts[(result.status, stock_status)] += 1
+            cause_counts[key] += 1
+            cause_examples.setdefault(key, [])
+            if len(cause_examples[key]) < 3:
+                cause_examples[key].append(fname)
             line = f"{fname}: custom={result.status} ({result.cause})  stock={stock_status}"
             disagreements.append(line)
 
@@ -92,7 +108,22 @@ def main():
     if total_compared:
         print(f"accuracy: {match/total_compared*100:.1f}%  (over {total_compared} calls with a known stock outcome)")
 
-    if disagreements:
+    if direction_counts:
+        print()
+        print("=== disagreement direction breakdown ===")
+        for (custom_status, stock_status), count in sorted(direction_counts.items(), key=lambda kv: -kv[1]):
+            pct = count / disagree * 100 if disagree else 0
+            print(f"  custom={custom_status:8s} stock={stock_status:8s}  count={count:5d}  ({pct:.1f}% of disagreements)")
+
+    if cause_counts:
+        print()
+        print("=== disagreement cause breakdown (top 15, with example files) ===")
+        for key, count in sorted(cause_counts.items(), key=lambda kv: -kv[1])[:15]:
+            custom_status, cause, stock_status = key
+            examples = ", ".join(cause_examples.get(key, []))
+            print(f"  custom={custom_status:8s} ({cause:14s}) stock={stock_status:8s}  count={count:5d}  e.g. {examples}")
+
+    if "--full" in sys.argv and disagreements:
         print()
         print(f"=== {len(disagreements)} disagreement(s) ===")
         for line in disagreements:
